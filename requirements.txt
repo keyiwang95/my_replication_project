@@ -1,0 +1,8 @@
+pandas
+numpy
+matplotlib
+statsmodels
+pytest
+python-dotenv
+doit
+jupyter
