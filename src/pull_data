@@ -8,65 +8,147 @@ options data, S&P 500 index closing prices, and risk-free rate data.
 
 import time
 from pathlib import Path
-
+from dateutil.relativedelta import relativedelta
+from datetime import datetime
 import pandas as pd
 import wrds
 
-from settings import config
+from decouple import config
 
 OUTPUT_DIR = Path(config("OUTPUT_DIR"))
 DATA_DIR = Path(config("DATA_DIR"))
 WRDS_USERNAME = config("WRDS_USERNAME")
 
-START_DATE = config("START_DATE")
-END_DATE = config("END_DATE")
-
-
 # Connect to WRDS
-db = wrds.Connection()
+db = wrds.Connection(wrds_username=WRDS_USERNAME)
 
-# Query monthly S&P 500 index options data
-query = """
-SELECT date, secid, strike_price, impl_volatility, volume, open_interest, cp_flag
-FROM optionm.opprcd
-WHERE date BETWEEN '1996-01-01' AND '2021-12-31'
-AND secid IN (SELECT secid FROM optionm.secprd WHERE underlying_symbol='SPX')
-"""
-spx_options_monthly = db.raw_sql(query, date_cols=['date'])
+# Read WRDS_USERNAME from .env
+WRDS_USERNAME = config("WRDS_USERNAME")
 
-# Query monthly S&P 500 index closing prices
-query = """
-SELECT date, secid, close_price
-FROM optionm.secprd
-WHERE date BETWEEN '1996-01-01' AND '2021-12-31'
-AND underlying_symbol='SPX'
-"""
-spx_index_monthly = db.raw_sql(query, date_cols=['date'])
+# SECID for S&P 500 options
+secid = 108105  
+
+# Define the range of years
+years = range(1996, 2022)
+
+# Store query results
+option_data_list = []
+
+for year in years:
+    # --- Optimized query: support multiple expiration intervals ---
+    option_query = f"""
+    WITH first_trading_day AS (
+        SELECT DATE_TRUNC('month', date) AS month, MIN(date) AS first_day
+        FROM optionm.opprcd{year}
+        WHERE secid = {secid}
+        GROUP BY month
+    )
+    SELECT o.date, o.secid, o.strike_price, o.cp_flag, o.best_bid, o.best_offer, 
+           o.volume, o.open_interest, o.impl_volatility, o.exdate
+    FROM optionm.opprcd{year} o
+    INNER JOIN first_trading_day f
+    ON o.date = f.first_day
+    WHERE o.secid = {secid}
+    AND EXTRACT(MONTH FROM age(o.exdate, o.date)) IN (0, 1, 2, 3, 5, 6, 7, 10, 11, 12, 13);
+    """
+    
+    option_df = db.raw_sql(option_query)   # days_to_expiration must be large than 7
+    option_data_list.append(option_df)
+
+# Close the WRDS connection
+db.close()
+
+# Merge all data
+option_data = pd.concat(option_data_list, ignore_index=True)
+    
+# Calculate mid price
+option_data["mid_price"] = (option_data["best_bid"] + option_data["best_offer"]) / 2
+
+# Convert date and exdate to datetime format
+option_data["date"] = pd.to_datetime(option_data["date"])
+option_data["exdate"] = pd.to_datetime(option_data["exdate"])
+
+# Calculate the number of months between date and exdate
+option_data["months_to_expiry"] = option_data.apply(
+    lambda row: (relativedelta(row["exdate"], row["date"]).years * 12 + 
+                 relativedelta(row["exdate"], row["date"]).months), 
+    axis=1
+)
+
+# Sort data by date and months_to_expiry in ascending order
+option_data = option_data.sort_values(by=["date", "months_to_expiry"]).reset_index(drop=True)
+
+# Save data
+option_data.to_csv("sp500_option_data_15th_sorted_1996_2021.csv", index=False)
+print("✅ Data has been sorted by months_to_expiry and saved!")
 
 
-# Query monthly risk-free rate data
-query = """
-SELECT date, days, rate
-FROM optionm.riskfreerate
-WHERE date BETWEEN '1996-01-01' AND '2021-12-31'
-"""
-spx_riskfree_monthly = db.raw_sql(query, date_cols=['date'])
+# Pull S&P 500 index closing prices
+# Connect to WRDS
+# Store data for all years
+rf_data_list = []
 
-# Process data
-spx_options_monthly['strike_price'] /= 1000  # Adjust strike price
+for year in range(1996, 2022):
+    try:
+        rf_query = f"""
+        SELECT date, borrowrate
+        FROM optionm.borrate{year}
+        WHERE borrowrate != -99.990000  -- Filter out invalid data
+        """
+        rf_year_data = db.raw_sql(rf_query)
 
-# Merge datasets
-merged_monthly_data = spx_options_monthly.merge(spx_index_monthly, on=['date', 'secid'], how='left') \
-                                         .merge(spx_riskfree_monthly, on='date', how='left') 
-                                         
+        if not rf_year_data.empty:
+            rf_data_list.append(rf_year_data)
+        else:
+            print(f"⚠️ No valid Borrow Rate data for {year}.")
+
+    except Exception as e:
+        print(f"❌ Failed to retrieve `borrate` data for {year}: {e}")
+
+# Merge data from all years
+if rf_data_list:
+    rf_data = pd.concat(rf_data_list, ignore_index=True)
+else:
+    print("❌ No Borrow Rate data retrieved!")
+
+# Close WRDS connection
+db.close()
+
+# Select the first record of each month
+monthly_rf_data = rf_data.resample('M').first().reset_index()
+
+# Ensure no invalid data is included
+monthly_rf_data = monthly_rf_data[monthly_rf_data["borrowrate"] != -99.990000]
 
 # Save data to a CSV file
-merged_monthly_data.to_csv("spx_options_monthly_1996_2021.csv", index=False)
+monthly_rf_data.to_csv("monthly_risk_free_rate.csv", index=False)
 
-# Display sample data
-print(merged_monthly_data.head())
+print("✅ Monthly risk-free rate has been saved to `monthly_risk_free_rate.csv`!")
+# Display results
+print(monthly_rf_data.head())
 
-# Save the data to disk
-file_name = f"spx_options_monthly_1996_2021.parquet"
-file_path = DATA_DIR / file_name
-# df.to_parquet(file_path)
+
+
+conn = wrds.Connection(wrds_username='WRDS_USERNAME')  # Connect to WRDS
+
+# Query the S&P 500 index options data
+query = """
+SELECT caldt, sprtrn, spindx
+FROM crsp.msp500
+WHERE caldt BETWEEN '1996-01-01' AND '2021-12-31'
+"""
+df_index = conn.raw_sql(query)
+
+# Rename and format the date column
+df_index = df_index.rename(columns={'caldt': 'date'})
+df_index['date'] = pd.to_datetime(df_index['date'])
+
+# Save as CSV
+df_index.to_csv("SP500_index_data_1996_2021.csv", index=False)
+
+# Check output
+print("CSV file saved: SP500_index_data_1996_2021.csv")
+print(df_index.head())
+
+# Close WRDS connection
+conn.close()
