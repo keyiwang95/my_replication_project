@@ -6,7 +6,7 @@ This project replicates findings on **forward return expectations and forecast e
 
 This replication study aims to reproduce key financial results related to forward rate expectations and forecast errors. The project includes:
 
-- **Data Collection**: Extracting financial data from **OptionMetrics** and **WRDS**.
+- **Data Collection**: Extracting financial data from **OptionMetrics** and **WRDS** and surveys
 - **Data Cleaning**: Processing and structuring raw data for analysis.
 - **Methodology**: Implementing regression models to analyze forecast errors.
 - **Visualization**: Generating tables and figures to illustrate results.
