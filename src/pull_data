@@ -1,0 +1,72 @@
+"""
+This file contains our SQL Query to Wharton Research Dataservices (WRDS).
+
+We connect to the database, and then submit a query per year. This code was
+written by Keyi Wang, and is used to pull data from WRDS for the S&P 500 index
+options data, S&P 500 index closing prices, and risk-free rate data.
+"""
+
+import time
+from pathlib import Path
+
+import pandas as pd
+import wrds
+
+from settings import config
+
+OUTPUT_DIR = Path(config("OUTPUT_DIR"))
+DATA_DIR = Path(config("DATA_DIR"))
+WRDS_USERNAME = config("WRDS_USERNAME")
+
+START_DATE = config("START_DATE")
+END_DATE = config("END_DATE")
+
+
+# Connect to WRDS
+db = wrds.Connection()
+
+# Query monthly S&P 500 index options data
+query = """
+SELECT date, secid, strike_price, impl_volatility, volume, open_interest, cp_flag
+FROM optionm.opprcd
+WHERE date BETWEEN '1996-01-01' AND '2021-12-31'
+AND secid IN (SELECT secid FROM optionm.secprd WHERE underlying_symbol='SPX')
+"""
+spx_options_monthly = db.raw_sql(query, date_cols=['date'])
+
+# Query monthly S&P 500 index closing prices
+query = """
+SELECT date, secid, close_price
+FROM optionm.secprd
+WHERE date BETWEEN '1996-01-01' AND '2021-12-31'
+AND underlying_symbol='SPX'
+"""
+spx_index_monthly = db.raw_sql(query, date_cols=['date'])
+
+
+# Query monthly risk-free rate data
+query = """
+SELECT date, days, rate
+FROM optionm.riskfreerate
+WHERE date BETWEEN '1996-01-01' AND '2021-12-31'
+"""
+spx_riskfree_monthly = db.raw_sql(query, date_cols=['date'])
+
+# Process data
+spx_options_monthly['strike_price'] /= 1000  # Adjust strike price
+
+# Merge datasets
+merged_monthly_data = spx_options_monthly.merge(spx_index_monthly, on=['date', 'secid'], how='left') \
+                                         .merge(spx_riskfree_monthly, on='date', how='left') 
+                                         
+
+# Save data to a CSV file
+merged_monthly_data.to_csv("spx_options_monthly_1996_2021.csv", index=False)
+
+# Display sample data
+print(merged_monthly_data.head())
+
+# Save the data to disk
+file_name = f"spx_options_monthly_1996_2021.parquet"
+file_path = DATA_DIR / file_name
+# df.to_parquet(file_path)
